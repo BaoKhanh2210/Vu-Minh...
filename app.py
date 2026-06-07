@@ -8,8 +8,8 @@
  ra quyết định, gồm 5 trang (tab):
      Bối cảnh → Mô hình → Dữ liệu → Tính toán → Chính sách
 
- Họ và tên   : Nguyễn Bảo Khánh
- Mã sinh viên: 23051266
+ Họ và tên   : Trần Dương Nhi
+ Mã sinh viên: 23051367
  Bài tập lớn : Các mô hình ra quyết định
 
  Chạy:  streamlit run app.py
@@ -159,8 +159,8 @@ with st.sidebar:
     st.markdown(
         """
         <div class="sb-id">
-        <b>Họ và tên:</b> Nguyễn Bảo Khánh<br>
-        <b>Mã sinh viên:</b> 23051266<br>
+        <b>Họ và tên:</b> Trần Dương Nhi<br>
+        <b>Mã sinh viên:</b> 23051367<br>
         <b>Bài tập lớn:</b> Các mô hình ra quyết định
         </div>
         """,
@@ -2247,9 +2247,6 @@ def page_bai12():
                  bounds=[(0, None)]*(2*Nn), method="highs")
     NJ = coeff*rl.x[:Nn] + b1*rl.x[Nn:]
 
-    st.markdown("Đồ án tổng kết tích hợp các kỹ thuật Bài 1–11 thành hệ thống **AIDEOM-VN** "
-                "gồm **6 module liên kết**. Mỗi module dưới đây là một mắt xích của pipeline "
-                "**M1 → M2 → M3 → M4 → M5 → M6**.")
     st.dataframe(pd.DataFrame({
         "Module": ["M1", "M2", "M3", "M4", "M5", "M6"],
         "Tên": ["Dự báo kinh tế", "Đánh giá sẵn sàng số", "Tối ưu phân bổ",
@@ -2384,4 +2381,4 @@ except Exception as e:
     st.exception(e)
 
 st.markdown("---")
-st.caption("VN AIDEOM-VN • Nguyễn Bảo Khánh – 23051266 • Bài tập lớn: Các mô hình ra quyết định")
+st.caption("VN AIDEOM-VN • Trần Dương Nhi – 23051367 • Bài tập lớn: Các mô hình ra quyết định")
