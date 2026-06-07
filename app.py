@@ -8,8 +8,8 @@
  ra quyết định, gồm 5 trang (tab):
      Bối cảnh → Mô hình → Dữ liệu → Tính toán → Chính sách
 
- Họ và tên   : Vũ Công Minh
- Mã sinh viên: 23051329
+ Họ và tên   : Trần Dương Nhi
+ Mã sinh viên: 23051367
  Bài tập lớn : Các mô hình ra quyết định
 
  Chạy:  streamlit run app.py
@@ -159,8 +159,8 @@ with st.sidebar:
     st.markdown(
         """
         <div class="sb-id">
-        <b>Họ và tên:</b> Vũ Công Minh<br>
-        <b>Mã sinh viên:</b> 23051329<br>
+        <b>Họ và tên:</b> Trần Dương Nhi<br>
+        <b>Mã sinh viên:</b> 23051367<br>
         <b>Bài tập lớn:</b> Các mô hình ra quyết định
         </div>
         """,
@@ -2381,4 +2381,4 @@ except Exception as e:
     st.exception(e)
 
 st.markdown("---")
-st.caption("VN AIDEOM-VN • Vũ Công Minh – 23051329 • Bài tập lớn: Các mô hình ra quyết định")
+st.caption("VN AIDEOM-VN • Trần Dương Nhi – 23051367 • Bài tập lớn: Các mô hình ra quyết định")
