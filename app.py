@@ -599,12 +599,19 @@ def page_bai3():
         st.latex(r"\tilde{x}_i = \frac{x_i - \min x}{\max x - \min x}, \quad \widetilde{Risk}_i = \frac{\max x - x_i}{\max x - \min x}")
 
     with t_data:
-        st.subheader("3.3. Dữ liệu & ma trận chuẩn hóa")
+        st.subheader("3.3. Dữ liệu gốc 10 ngành (2024)")
+        raw = df[["sector_vi", "growth_rate_2024_pct", "labor_productivity", "spillover_coef_0_1",
+                  "export_billion_USD", "labor_million", "ai_readiness_0_100", "automation_risk_pct"]].copy()
+        raw.columns = ["Ngành", "Tăng trưởng %", "Năng suất", "Lan tỏa", "XK (tỷ USD)",
+                       "Việc làm (tr)", "AI Ready", "Rủi ro TĐH %"]
+        st.dataframe(raw.round(2), use_container_width=True, hide_index=True)
+        st.subheader("Câu 3.4.1 — Ma trận chuẩn hóa min-max [0,1] (đảo dấu Risk)")
         Xg_show = Xg.copy()
         Xg_show.columns = ["Tăng trưởng", "Năng suất", "Lan tỏa", "Xuất khẩu", "Việc làm", "AI Ready"]
         Xg_show.insert(0, "Ngành", df["sector_vi"].values)
         Xg_show["Risk(đảo)"] = np.round(Xb.values, 3)
         st.dataframe(Xg_show.round(3), use_container_width=True, hide_index=True)
+        st.caption("Risk được đảo dấu (Risk thấp → điểm cao) để đồng nhất hướng 'càng cao càng tốt'.")
 
     with t_calc:
         st.subheader("Câu 3.4.2 — Xếp hạng Priorityᵢ")
@@ -1304,6 +1311,59 @@ def compare_strategies(rho=0.97):
     return rows
 
 
+@st.cache_data(show_spinner="Đang phân tích cú sốc 2028...")
+def shock_analysis(rho=0.97, shock_t=2, shock_pct=0.08):
+    """Câu 8.3.3: cú sốc TFP giảm shock_pct tại năm shock_t (2028=t2). Trả về 3 kịch bản."""
+    from scipy.optimize import minimize
+    a, b, gd, dai, th = 0.33, 0.42, 0.10, 0.08, 0.07
+    dK, dD, dAI, thH, mu = 0.05, 0.12, 0.15, 0.8, 0.02
+    phi1, phi2, phi3, gcr, T = 0.003, 0.002, 0.004, 1.5, 10
+    K0, L0, D0, AI0, H0, Y0 = 27500.0, 53.9, 20.3, 86.0, 30.0, 12847.6
+    A0 = Y0 / (K0 ** a * L0 ** b * D0 ** gd * AI0 ** dai * H0 ** th)
+    L = np.array([L0 * 1.009 ** t for t in range(T + 1)])
+
+    def traj(u, sh_t=None, sh=0.0):
+        IK, ID, IAI, IH = u[0::4], u[1::4], u[2::4], u[3::4]
+        K = np.zeros(T+1); D = np.zeros(T+1); AI = np.zeros(T+1)
+        H = np.zeros(T+1); A = np.zeros(T+1); Y = np.zeros(T+1); C = np.zeros(T)
+        K[0], D[0], AI[0], H[0], A[0] = K0, D0, AI0, H0, A0
+        for t in range(T):
+            if sh_t is not None and t == sh_t:
+                A[t] *= (1 - sh)
+            Y[t] = A[t]*K[t]**a*L[t]**b*D[t]**gd*AI[t]**dai*H[t]**th
+            C[t] = Y[t]-IK[t]-ID[t]-IAI[t]-IH[t]
+            if C[t] <= 0:
+                return None
+            K[t+1] = (1-dK)*K[t]+IK[t]; D[t+1] = (1-dD)*D[t]+ID[t]
+            AI[t+1] = (1-dAI)*AI[t]+IAI[t]; H[t+1] = H[t]+thH*IH[t]-mu*H[t]
+            A[t+1] = A[t]*(1+phi1*(D[t]/100)+phi2*(AI[t]/100)+phi3*(H[t]/100))
+        Y[T] = A[T]*K[T]**a*L[T]**b*D[T]**gd*AI[T]**dai*H[T]**th
+        return K, D, AI, H, Y, C, A
+
+    def welf(u, sh_t=None, sh=0.0):
+        r = traj(u, sh_t, sh)
+        if r is None or np.any(r[5] <= 0):
+            return 1e15
+        C = r[5]
+        return -sum(rho**t*(C[t]**(1-gcr)-1)/(1-gcr) for t in range(T))
+
+    traj_t, _, _, u_opt = run_dynamic(rho)         # kế hoạch gốc (không sốc)
+    W_base = -welf(u_opt)
+    # (B) giữ kế hoạch gốc nhưng có sốc
+    Y_sh = traj(u_opt, shock_t, shock_pct)[4]
+    W_plan_shock = -welf(u_opt, shock_t, shock_pct)
+    # (C) tái tối ưu sau sốc
+    cons = [{"type": "ineq",
+             "fun": lambda u: (lambda r: -1e10 if r is None else min(r[5])-1)(traj(u, shock_t, shock_pct))}]
+    res = minimize(lambda u: welf(u, shock_t, shock_pct), u_opt, method="SLSQP",
+                   bounds=[(0, None)]*(T*4), constraints=cons,
+                   options={"maxiter": 1000, "ftol": 1e-8})
+    W_reopt = -res.fun
+    Y_reopt = traj(res.x, shock_t, shock_pct)[4]
+    return {"years": np.arange(2026, 2037), "Y_base": traj_t[4], "Y_shock": Y_sh, "Y_reopt": Y_reopt,
+            "W_base": W_base, "W_plan_shock": W_plan_shock, "W_reopt": W_reopt}
+
+
 def sidebar_bai8():
     with SB:
         st.markdown("### Tham số Bài 8")
@@ -1385,6 +1445,27 @@ def page_bai8():
         st.caption(f"Tổng đầu tư 3 năm đầu = {front:,.0f} tỷ vs 3 năm cuối = {back:,.0f} tỷ → "
                    f"quỹ đạo **{'front-loaded (đầu tư sớm)' if front > back else 'back-loaded'}**. "
                    "Mô hình ưu tiên đầu tư sớm vì TFP nội sinh tạo hiệu ứng lan tỏa tích lũy.")
+
+        st.subheader("Câu 8.3.3 — Phân tích cú sốc 2028 (Y giảm 8%, như bão Yagi)")
+        sh = shock_analysis(P["rho"])
+        m = st.columns(3)
+        m[0].metric("W không sốc", f"{sh['W_base']:.3f}")
+        m[1].metric("W có sốc (giữ kế hoạch)", f"{sh['W_plan_shock']:.3f}",
+                    f"{sh['W_plan_shock']-sh['W_base']:+.3f}")
+        m[2].metric("W tái tối ưu sau sốc", f"{sh['W_reopt']:.3f}",
+                    f"{sh['W_reopt']-sh['W_plan_shock']:+.3f}")
+        fig, ax = plt.subplots(figsize=(9, 3.2))
+        ax.plot(sh["years"], sh["Y_base"], "k-o", ms=4, label="Không sốc")
+        ax.plot(sh["years"], sh["Y_shock"], "r-s", ms=4, label="Có sốc, giữ kế hoạch")
+        ax.plot(sh["years"], sh["Y_reopt"], "g-^", ms=4, label="Có sốc, tái tối ưu")
+        ax.axvline(2028, color="gray", ls="--", lw=1)
+        ax.set_xlabel("Năm"); ax.set_ylabel("GDP (ngh.tỷ)"); ax.legend(); ax.grid(alpha=0.3)
+        ax.set_title("Tác động cú sốc TFP năm 2028 lên quỹ đạo GDP")
+        show_fig(fig)
+        st.caption("Cú sốc TFP năm 2028 (giảm 8%) tác động kéo dài qua động học A_{t+1}=A_t(1+...). "
+                   "Khi **tái tối ưu sau sốc**, mô hình điều chỉnh phân bổ (giảm đầu tư để giữ tiêu "
+                   "dùng, ưu tiên hạng mục phục hồi nhanh) nên phúc lợi cải thiện so với cứng nhắc "
+                   "giữ kế hoạch cũ — minh họa giá trị của tính linh hoạt chính sách.")
 
         st.subheader("Câu 8.3.4 — So sánh chiến lược đầu tư")
         comp = compare_strategies(P["rho"])
@@ -1498,7 +1579,41 @@ def page_bai9():
                        "đào tạo để giữ NetJob ≥ 0 — đúng nguyên tắc 'tự động hóa không vượt năng "
                        "lực đào tạo lại'.")
 
-            st.subheader("Câu 9.4.3 — Nhóm dễ bị tổn thương")
+            st.subheader("Câu 9.4.2 — Ngưỡng đào tạo tối thiểu (CN chế biến chế tạo)")
+            i = 1  # CN chế biến
+            net = a1[i] - c1[i] * risk[i]
+            ratio = c1[i] * risk[i] / d1[i]
+            cc = st.columns([1, 1])
+            with cc[0]:
+                st.markdown(f"Ngành **{sec[i]}**: a₁={a1[i]}, c₁·risk={c1[i]*risk[i]:.1f}, d₁={d1[i]}.")
+                st.latex(r"Displaced \le RetrainCap \Rightarrow x_H \ge \frac{c_1\cdot risk}{d_1}\,x_{AI}")
+                st.metric("Hệ số net AI", f"{net:.1f}",
+                          "AI tạo việc ròng" if net > 0 else "AI làm mất việc ròng")
+                st.metric("Tỷ lệ đào tạo tối thiểu x_H/x_AI", f"{ratio:.3f}")
+                st.caption(f"Mỗi 1 tỷ đầu tư AI cần ≥ **{ratio:.3f} tỷ** đầu tư đào tạo lại để giữ "
+                           f"năng lực retraining. Nếu dùng hết 30.000 tỷ cho AI thì cần x_H ≥ "
+                           f"{ratio*30000:,.0f} tỷ.")
+            with cc[1]:
+                xr = np.linspace(0, 30000, 100)
+                fig, ax = plt.subplots(figsize=(6, 3.6))
+                ax.plot(xr, ratio * xr, "r--", lw=2, label=f"Retrain: x_H≥{ratio:.3f}·x_AI")
+                ax.plot(xr, np.maximum(0, -net / b1[i] * xr), "b--", lw=2, label="NetJob≥0")
+                ax.fill_between(xr, np.maximum(ratio * xr, np.maximum(0, -net / b1[i] * xr)), 30000,
+                                alpha=0.2, color="green", label="Vùng khả thi")
+                ax.set_xlabel("x_AI (tỷ)"); ax.set_ylabel("x_H tối thiểu (tỷ)")
+                ax.set_xlim(0, 30000); ax.set_ylim(0, 30000); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+                ax.set_title(f"Ngưỡng đào tạo — {sec[i]}")
+                show_fig(fig)
+
+            st.subheader("Câu 9.4.4 — Ràng buộc Displaced ≤ 5% lao động")
+            if P["add5"]:
+                st.success("Đang BẬT ràng buộc 5% (chọn ở sidebar). Kết quả phía trên đã phản ánh "
+                           "giới hạn này — tổng NetJob có thể thấp hơn nhưng an toàn xã hội cao hơn.")
+            else:
+                st.info("Bật ràng buộc '≤ 5% lao động mỗi ngành' ở sidebar để xem ảnh hưởng. "
+                        "Ràng buộc này giới hạn số lao động bị dịch chuyển ở mỗi ngành, bảo đảm "
+                        "an sinh nhưng có thể làm giảm tổng NetJob (đánh đổi hiệu quả ↔ an toàn).")
+
             vuln = [0, 2, 3]
             kept, retr, lost = [], [], []
             for j in vuln:
@@ -1532,6 +1647,7 @@ def page_bai9():
 def page_bai10():
     page_title("🎲", "Bài 10 — Quy hoạch ngẫu nhiên hai giai đoạn dưới bất định", "Bài 10")
     J = ["I", "D", "AI", "H"]; S = ["s1", "s2", "s3", "s4"]
+    S_VI = {"s1": "Lạc quan", "s2": "Cơ sở", "s3": "Bi quan", "s4": "Khủng hoảng"}
     p_s = {"s1": 0.30, "s2": 0.45, "s3": 0.20, "s4": 0.05}
     beta_base = {"I": 1.00, "D": 1.10, "AI": 1.25, "H": 0.95}
     beta_s = {("s1", "I"): 1.25, ("s1", "D"): 1.35, ("s1", "AI"): 1.55, ("s1", "H"): 1.05,
@@ -1544,44 +1660,70 @@ def page_bai10():
 
     with t_ctx:
         st.subheader("10.1. Bối cảnh Việt Nam")
-        st.write("Việt Nam có độ mở thương mại ≈180% GDP, tăng trưởng phụ thuộc kịch bản toàn "
-                 "cầu. Chính phủ phải đưa quyết định **first-stage** (kế hoạch 5 năm) khi chưa "
-                 "biết chắc tương lai. Áp dụng quy hoạch ngẫu nhiên 2 giai đoạn.")
+        st.write("Việt Nam có độ mở thương mại rất cao (xuất nhập khẩu/GDP ≈ 180% năm 2025), "
+                 "nên tăng trưởng phụ thuộc lớn vào kịch bản kinh tế toàn cầu: cầu xuất khẩu, "
+                 "dòng FDI và biến động địa - chính trị. Khi hoạch định ngân sách đầu tư số "
+                 "2026–2030, Chính phủ phải đưa ra **quyết định first-stage (here-and-now)** — "
+                 "kế hoạch phân bổ 5 năm — *trước khi* biết chắc kịch bản tương lai, rồi mới "
+                 "**điều chỉnh recourse (wait-and-see)** sau khi quan sát thực tế.")
+        c = st.columns(4)
+        c[0].metric("Số kịch bản", "4")
+        c[1].metric("Ngân sách first-stage", "65.000 tỷ")
+        c[2].metric("Quỹ dự phòng recourse", "15.000 tỷ")
+        c[3].metric("Độ mở thương mại", "≈180% GDP")
+        st.markdown("**Vì sao cần quy hoạch ngẫu nhiên?** Nếu chỉ lập kế hoạch theo một kịch bản "
+                    "'trung bình' (deterministic), quyết định ban đầu sẽ thiếu khả năng thích ứng "
+                    "khi cú sốc xảy ra (như COVID-19, bão Yagi). Mô hình hai giai đoạn cho phép "
+                    "vừa tối ưu lợi ích kỳ vọng, vừa giữ tính linh hoạt điều chỉnh.")
 
     with t_mod:
-        st.subheader("10.2. Mô hình toán học")
-        st.latex(r"\max \sum_j \beta_j x_j + \sum_{s} p_s \sum_j \beta^s_j y^s_j")
-        st.markdown("First-stage: Σxⱼ ≤ 65.000 (giữ 15.000 dự phòng). Recourse: Σyⱼˢ ≤ 15.000; "
-                    r"$y^s_{AI} \le 0.5\,x_H$ (AI phụ thuộc nền tảng nhân lực).")
+        st.subheader("10.2. Mô hình toán học hai giai đoạn")
+        st.markdown("**Dạng chuẩn** (cực tiểu hóa chi phí kỳ vọng):")
+        st.latex(r"\min\ c'x + \sum_{s\in S} p_s\, Q(x,s), \quad Q(x,s)=\min\{q'y^s: T_s x + W y^s = h_s,\ y^s\ge 0\}")
+        st.markdown("**Dạng đơn giản hóa cho bài tập** (tối đa hóa tăng GDP kỳ vọng):")
+        st.latex(r"\max\ \sum_j \beta_j x_j + \sum_{s\in S} p_s \sum_j \beta^s_j\, y^s_j")
+        st.markdown("Ràng buộc:")
+        st.latex(r"\sum_j x_j \le 65000;\quad \sum_j y^s_j \le 15000\ \forall s;\quad y^s_{AI} \le 0.5\,x_H\ \forall s")
+        st.markdown("- **Giai đoạn 1** (here-and-now): biến $x=(x_I,x_D,x_{AI},x_H)$ — phân bổ ban "
+                    "đầu, giữ lại 15.000 tỷ dự phòng (nguyên tắc thận trọng).\n"
+                    "- **Giai đoạn 2** (recourse): biến $y^s$ — điều chỉnh sau khi biết kịch bản $s$.\n"
+                    "- Ràng buộc $y^s_{AI} \\le 0.5\\,x_H$: mở rộng AI bổ sung bị giới hạn bởi nền "
+                    "tảng nhân lực đã đầu tư từ giai đoạn 1.")
 
     with t_data:
-        st.subheader("10.3. Cấu trúc kịch bản & hệ số βˢⱼ")
+        st.subheader("10.3. Cấu trúc kịch bản (scenario tree)")
         st.dataframe(pd.DataFrame({
-            "Kịch bản": ["Lạc quan", "Cơ sở", "Bi quan", "Khủng hoảng"],
-            "Tăng trưởng TG %": [3.5, 2.8, 1.5, 0.2], "FDI (tỷ USD)": [32, 27, 20, 12],
-            "XK tăng %": [12, 8, 3, -5], "Xác suất": [0.30, 0.45, 0.20, 0.05]}),
+            "Kịch bản": [S_VI[s] for s in S],
+            "Tăng trưởng TG %": [3.5, 2.8, 1.5, 0.2], "FDI VN (tỷ USD)": [32, 27, 20, 12],
+            "XK VN tăng %": [12, 8, 3, -5], "Xác suất pₛ": [0.30, 0.45, 0.20, 0.05]}),
             use_container_width=True, hide_index=True)
+        st.subheader("Hệ số hiệu quả βˢⱼ theo kịch bản")
         st.dataframe(pd.DataFrame({"Hạng mục": J,
-                                   "s1": [beta_s[("s1", j)] for j in J],
-                                   "s2": [beta_s[("s2", j)] for j in J],
-                                   "s3": [beta_s[("s3", j)] for j in J],
-                                   "s4": [beta_s[("s4", j)] for j in J]}),
+                                   "β cơ bản": [beta_base[j] for j in J],
+                                   "s1 Lạc quan": [beta_s[("s1", j)] for j in J],
+                                   "s2 Cơ sở": [beta_s[("s2", j)] for j in J],
+                                   "s3 Bi quan": [beta_s[("s3", j)] for j in J],
+                                   "s4 Khủng hoảng": [beta_s[("s4", j)] for j in J]}),
                      use_container_width=True, hide_index=True)
+        st.caption("Lưu ý: hệ số H (nhân lực) **cao hơn trong kịch bản khủng hoảng** (1,10 > 0,95) "
+                   "vì lao động qua đào tạo có khả năng chuyển đổi việc làm tốt hơn, hấp thụ cú sốc "
+                   "— đây là lý do nhân lực số đóng vai trò 'bảo hiểm'.")
 
     with t_calc:
-        st.subheader("Câu 10.5.1–10.5.3 — Lời giải SP, VSS, EVPI")
         try:
             import pyomo.environ as pyo
 
             def gs():
                 for nm in ["appsi_highs", "glpk", "cbc"]:
-                    s = pyo.SolverFactory(nm)
-                    if s.available():
-                        return s
+                    sv = pyo.SolverFactory(nm)
+                    if sv.available():
+                        return sv
                 return None
             solver = gs()
             if solver is None:
                 raise RuntimeError("no solver")
+
+            # ---- Câu 10.5.1: Mô hình SP đầy đủ ----
             m = pyo.ConcreteModel()
             m.J = pyo.Set(initialize=J); m.S = pyo.Set(initialize=S)
             m.x = pyo.Var(m.J, within=pyo.NonNegativeReals)
@@ -1593,8 +1735,29 @@ def page_bai10():
                                   sum(p_s[s]*sum(beta_s[s, j]*m.y[s, j] for j in J) for s in S),
                                   sense=pyo.maximize)
             solver.solve(m)
-            Z_SP = pyo.value(m.obj); x_sp = {j: pyo.value(m.x[j]) for j in J}
-            Z_WS = 0
+            Z_SP = pyo.value(m.obj)
+            x_sp = {j: pyo.value(m.x[j]) for j in J}
+            y_sp = {s: {j: pyo.value(m.y[s, j]) for j in J} for s in S}
+
+            st.subheader("Câu 10.5.1 — Lời giải Stochastic (SP)")
+            cc = st.columns([1, 1])
+            with cc[0]:
+                st.markdown("**Giai đoạn 1 (here-and-now):**")
+                st.dataframe(pd.DataFrame({"Hạng mục": J, "x* (tỷ)": [round(x_sp[j]) for j in J]}),
+                             use_container_width=True, hide_index=True)
+                st.metric("Z* Stochastic", f"{Z_SP:,.0f}")
+            with cc[1]:
+                st.markdown("**Giai đoạn 2 (recourse yˢ) theo kịch bản:**")
+                st.dataframe(pd.DataFrame({"Kịch bản": [S_VI[s] for s in S],
+                                           **{j: [round(y_sp[s][j]) for s in S] for j in J}}),
+                             use_container_width=True, hide_index=True)
+            st.caption(f"Quyết định ban đầu tập trung vào hạng mục hiệu quả cao "
+                       f"(AI β={beta_base['AI']}, D β={beta_base['D']}) nhưng vẫn giữ x_H = "
+                       f"{x_sp['H']:,.0f} tỷ để 'mở khóa' khả năng đầu tư AI bổ sung ở giai đoạn 2.")
+
+            # ---- Câu 10.5.2: deterministic từng kịch bản + EV ----
+            st.subheader("Câu 10.5.2 — Lời giải xác định từng kịch bản & EV solution")
+            det = {}
             for s in S:
                 ms = pyo.ConcreteModel(); ms.J = pyo.Set(initialize=J)
                 ms.x = pyo.Var(ms.J, within=pyo.NonNegativeReals)
@@ -1604,13 +1767,17 @@ def page_bai10():
                 ms.ac = pyo.Constraint(expr=ms.y["AI"] <= 0.5 * ms.x["H"])
                 ms.obj = pyo.Objective(expr=sum(beta_base[j]*ms.x[j] for j in J) +
                                        sum(beta_s[s, j]*ms.y[j] for j in J), sense=pyo.maximize)
-                solver.solve(ms); Z_WS += p_s[s]*pyo.value(ms.obj)
+                solver.solve(ms)
+                det[s] = {"x": {j: pyo.value(ms.x[j]) for j in J}, "Z": pyo.value(ms.obj)}
+            Z_WS = sum(p_s[s]*det[s]["Z"] for s in S)
+            # EV solution: dùng beta trung bình
             beta_avg = {j: sum(p_s[s]*beta_s[s, j] for s in S) for j in J}
             mev = pyo.ConcreteModel(); mev.J = pyo.Set(initialize=J)
             mev.x = pyo.Var(mev.J, within=pyo.NonNegativeReals)
             mev.b = pyo.Constraint(expr=sum(mev.x[j] for j in J) <= 65000)
             mev.obj = pyo.Objective(expr=sum(beta_avg[j]*mev.x[j] for j in J), sense=pyo.maximize)
-            solver.solve(mev); x_ev = {j: pyo.value(mev.x[j]) for j in J}
+            solver.solve(mev)
+            x_ev = {j: pyo.value(mev.x[j]) for j in J}
             Z_EV = sum(beta_base[j]*x_ev[j] for j in J)
             for s in S:
                 mt = pyo.ConcreteModel(); mt.J = pyo.Set(initialize=J)
@@ -1618,20 +1785,105 @@ def page_bai10():
                 mt.b2 = pyo.Constraint(expr=sum(mt.y[j] for j in J) <= 15000)
                 mt.ac = pyo.Constraint(expr=mt.y["AI"] <= 0.5*x_ev["H"])
                 mt.obj = pyo.Objective(expr=sum(beta_s[s, j]*mt.y[j] for j in J), sense=pyo.maximize)
-                solver.solve(mt); Z_EV += p_s[s]*pyo.value(mt.obj)
-            cc = st.columns([1, 1])
+                solver.solve(mt)
+                Z_EV += p_s[s]*pyo.value(mt.obj)
+            cc = st.columns([1.3, 1])
             with cc[0]:
-                st.dataframe(pd.DataFrame({"Hạng mục": J, "x* SP": [round(x_sp[j]) for j in J],
-                                           "x* EV": [round(x_ev[j]) for j in J]}),
+                st.dataframe(pd.DataFrame({"Kịch bản": [S_VI[s] for s in S],
+                                           "Z*[s] (Wait&See)": [round(det[s]["Z"]) for s in S],
+                                           **{f"x_{j}": [round(det[s]["x"][j]) for s in S] for j in J}}),
                              use_container_width=True, hide_index=True)
             with cc[1]:
-                st.metric("Z* Stochastic", f"{Z_SP:,.0f}")
-                st.metric("VSS = Z_SP − Z_EV", f"{Z_SP-Z_EV:,.0f}")
-                st.metric("EVPI = Z_WS − Z_SP", f"{Z_WS-Z_SP:,.0f}")
-            st.info("VSS đo giá trị của tư duy xác suất; EVPI đo giá trị thông tin hoàn hảo.")
+                st.dataframe(pd.DataFrame({"Hạng mục": J,
+                                           "x* SP": [round(x_sp[j]) for j in J],
+                                           "x* EV": [round(x_ev[j]) for j in J]}),
+                             use_container_width=True, hide_index=True)
+            dH = x_sp["H"] - x_ev["H"]
+            st.caption(f"So sánh first-stage: lời giải **SP đầu tư H = {x_sp['H']:,.0f} tỷ** so với "
+                       f"**EV = {x_ev['H']:,.0f} tỷ** (chênh {dH:+,.0f} tỷ). "
+                       f"{'SP đầu tư nhân lực nhiều hơn — chuẩn bị cho kịch bản xấu.' if dH > 0 else 'Hai lời giải khá tương đồng ở hạng mục H.'}")
+
+            # ---- Câu 10.5.3: VSS & EVPI ----
+            st.subheader("Câu 10.5.3 — VSS và EVPI")
+            VSS, EVPI = Z_SP - Z_EV, Z_WS - Z_SP
+            m3 = st.columns(3)
+            m3[0].metric("Z_SP (Stochastic)", f"{Z_SP:,.0f}")
+            m3[1].metric("Z_EV (Expected Value)", f"{Z_EV:,.0f}")
+            m3[2].metric("Z_WS (Wait & See)", f"{Z_WS:,.0f}")
+            m3b = st.columns(2)
+            m3b[0].metric("VSS = Z_SP − Z_EV", f"{VSS:,.0f}",
+                          help="Giá trị của việc cân nhắc bất định khi ra quyết định")
+            m3b[1].metric("EVPI = Z_WS − Z_SP", f"{EVPI:,.0f}",
+                          help="Giá trị của thông tin hoàn hảo")
+            fig, ax = plt.subplots(figsize=(8, 3))
+            bars = ax.barh(["Z_EV (bỏ qua bất định)", "Z_SP (xét bất định)", "Z_WS (thông tin hoàn hảo)"],
+                           [Z_EV, Z_SP, Z_WS], color=["#e67e22", "#3498db", "#2ecc71"])
+            ax.set_xlim(min(Z_EV, Z_SP, Z_WS)*0.98, Z_WS*1.01)
+            for bar, v in zip(bars, [Z_EV, Z_SP, Z_WS]):
+                ax.text(v, bar.get_y()+bar.get_height()/2, f" {v:,.0f}", va="center", fontsize=9)
+            ax.set_title("Z_EV ≤ Z_SP ≤ Z_WS (thứ tự lý thuyết)")
+            show_fig(fig)
+            st.info(f"**VSS = {VSS:,.0f}**: nếu bỏ qua bất định và lập kế hoạch theo kịch bản "
+                    f"trung bình, sẽ thiệt {VSS:,.0f} tỷ so với mô hình xác suất → đo *giá trị "
+                    f"của tư duy stochastic*. **EVPI = {EVPI:,.0f}**: mức tối đa nên chi cho "
+                    "thông tin/dự báo hoàn hảo (ví dụ đầu tư hệ thống cảnh báo sớm, mô hình dự báo).")
+
+            # ---- Câu 10.5.4: Robust optimization (minimax regret) ----
+            st.subheader("Câu 10.5.4 — Robust optimization (minimax regret)")
+            mr = pyo.ConcreteModel()
+            mr.J = pyo.Set(initialize=J); mr.S = pyo.Set(initialize=S)
+            mr.x = pyo.Var(mr.J, within=pyo.NonNegativeReals)
+            mr.y = pyo.Var(mr.S, mr.J, within=pyo.NonNegativeReals)
+            mr.w = pyo.Var(within=pyo.Reals)
+            mr.b1 = pyo.Constraint(expr=sum(mr.x[j] for j in J) <= 65000)
+            mr.b2 = pyo.Constraint(mr.S, rule=lambda mm, s: sum(mm.y[s, j] for j in J) <= 15000)
+            mr.ac = pyo.Constraint(mr.S, rule=lambda mm, s: mm.y[s, "AI"] <= 0.5*mm.x["H"])
+            mr.reg = pyo.Constraint(mr.S, rule=lambda mm, s: det[s]["Z"] -
+                                    (sum(beta_base[j]*mm.x[j] for j in J) +
+                                     sum(beta_s[s, j]*mm.y[s, j] for j in J)) <= mm.w)
+            mr.obj = pyo.Objective(expr=mr.w, sense=pyo.minimize)
+            solver.solve(mr)
+            x_rob = {j: pyo.value(mr.x[j]) for j in J}
+            w_rob = pyo.value(mr.w)
+
+            def regret_of(xf):
+                reg = {}
+                for s in S:
+                    z = sum(beta_base[j]*xf[j] for j in J)
+                    ms = pyo.ConcreteModel(); ms.J = pyo.Set(initialize=J)
+                    ms.y = pyo.Var(ms.J, within=pyo.NonNegativeReals)
+                    ms.b2 = pyo.Constraint(expr=sum(ms.y[j] for j in J) <= 15000)
+                    ms.ac = pyo.Constraint(expr=ms.y["AI"] <= 0.5*xf["H"])
+                    ms.obj = pyo.Objective(expr=sum(beta_s[s, j]*ms.y[j] for j in J), sense=pyo.maximize)
+                    solver.solve(ms)
+                    z += pyo.value(ms.obj)
+                    reg[s] = det[s]["Z"] - z
+                return reg
+            reg_sp, reg_rob = regret_of(x_sp), regret_of(x_rob)
+            cc = st.columns([1.2, 1])
+            with cc[0]:
+                st.dataframe(pd.DataFrame({
+                    "Kịch bản": [S_VI[s] for s in S],
+                    "Regret (SP)": [round(reg_sp[s]) for s in S],
+                    "Regret (Robust)": [round(reg_rob[s]) for s in S]}),
+                    use_container_width=True, hide_index=True)
+                st.caption(f"Max regret: SP = {max(reg_sp.values()):,.0f} vs "
+                           f"Robust = {max(reg_rob.values()):,.0f}")
+            with cc[1]:
+                st.dataframe(pd.DataFrame({"Hạng mục": J,
+                                           "x* SP": [round(x_sp[j]) for j in J],
+                                           "x* Robust": [round(x_rob[j]) for j in J]}),
+                             use_container_width=True, hide_index=True)
+            st.info("Robust (minimax regret) tối thiểu hóa 'hối tiếc' ở kịch bản xấu nhất, nên "
+                    "thường **thận trọng hơn SP**: đầu tư an toàn hơn để không quá tệ trong bất kỳ "
+                    "kịch bản nào, đổi lại lợi ích kỳ vọng có thể thấp hơn đôi chút. Đây là lựa "
+                    "chọn phù hợp khi nhà hoạch định 'ngại rủi ro' (risk-averse).")
+
         except Exception as e:
-            st.warning(f"Không có solver Pyomo khả dụng ({e}). Hiển thị kết quả tham chiếu.")
-            st.dataframe(pd.DataFrame({"Kịch bản": S, "Z*[s] Wait&See": [101500, 97750, 96250, 97750],
+            st.warning(f"Không có solver Pyomo khả dụng trong môi trường này ({e}). "
+                       "Hiển thị kết quả tham chiếu từ notebook.")
+            st.dataframe(pd.DataFrame({"Kịch bản": [S_VI[s] for s in S],
+                                       "Z*[s] Wait&See": [101500, 97750, 96250, 97750],
                                        "Xác suất": list(p_s.values())}),
                          use_container_width=True, hide_index=True)
             st.metric("Z* Stochastic (tham chiếu)", "98.575")
@@ -1639,12 +1891,24 @@ def page_bai10():
     with t_pol:
         st.subheader("10.6. Câu hỏi thảo luận chính sách")
         st.markdown(
-            "**a)** Lời giải SP đầu tư **H nhiều hơn** EV vì H là 'bảo hiểm' (βₕ cao trong kịch "
-            "bản khủng hoảng).\n\n"
-            "**b)** VSS dương cho thấy tư duy xác suất có giá trị thực trong hoạch định chính sách "
-            "Việt Nam.\n\n"
-            "**c)** COVID-19 và bão Yagi: Việt Nam có thể đang 'dưới đầu tư' vào nhân lực số như "
-            "hàng hóa bảo hiểm rủi ro."
+            "**a) So với lời giải xác định, lời giải SP đầu tư H nhiều hơn hay ít hơn? Vì sao?**  \n"
+            "Lời giải SP có xu hướng đầu tư vào **nhân lực số H nhiều hơn** lời giải EV. Lý do: "
+            "hệ số βₕ cao nhất trong kịch bản khủng hoảng (1,10) — H đóng vai trò 'hàng hóa bảo "
+            "hiểm', vừa giúp hấp thụ cú sốc, vừa 'mở khóa' khả năng đầu tư AI bổ sung ở giai đoạn "
+            "2 (ràng buộc y_AI ≤ 0,5·x_H). Tư duy xác suất buộc mô hình chuẩn bị cho cả kịch bản xấu.\n\n"
+            "**b) VSS dương nói lên điều gì về giá trị của tư duy xác suất trong hoạch định chính "
+            "sách Việt Nam?**  \n"
+            "VSS dương chứng minh rằng **bỏ qua bất định gây thiệt hại đo được**: lập kế hoạch chỉ "
+            "theo một kịch bản 'trung bình' kém hơn việc cân nhắc toàn bộ phân phối kịch bản. Với "
+            "một nền kinh tế mở như Việt Nam, đây là lập luận định lượng ủng hộ việc thể chế hóa "
+            "phân tích kịch bản trong quy trình lập ngân sách trung hạn.\n\n"
+            "**c) COVID-19 (2020–2022) và bão Yagi (2024) là các cú sốc thực tế. Việt Nam có đang "
+            "'dưới đầu tư' vào nhân lực số như một hàng hóa bảo hiểm không?**  \n"
+            "Cả hai cú sốc cho thấy nền kinh tế dễ tổn thương trước biến động ngoại sinh. Mô hình "
+            "gợi ý rằng đầu tư vào nhân lực số (H) và giữ quỹ dự phòng có giá trị bảo hiểm cao — "
+            "nếu thực tế đầu tư H thấp hơn mức SP đề xuất, có cơ sở để nói Việt Nam đang 'dưới đầu "
+            "tư' vào năng lực chống chịu. Robust optimization còn nhấn mạnh thêm: nên ưu tiên "
+            "phương án ít hối tiếc nhất ở kịch bản xấu, thay vì chạy theo kỳ vọng đơn thuần."
         )
 
 
@@ -1731,12 +1995,19 @@ def page_bai11():
         st.latex(r"Q(s,a) \leftarrow Q(s,a) + \alpha[r + \gamma \max_{a'} Q(s',a') - Q(s,a)]")
 
     with t_data:
-        st.subheader("11.3. Cấu hình hành động (phân bổ ngân sách)")
+        st.subheader("Câu 11.3.1 — Môi trường (gymnasium Env) & 5 hành động")
+        st.markdown("Môi trường `VietnamEconomyEnv` mô phỏng 10 năm (T=10) là một episode, với "
+                    "`reset()`, `step()`, `action_space=Discrete(5)`, `observation_space="
+                    "MultiDiscrete([3,3,3,3])`. Mỗi hành động là một cơ cấu phân bổ ngân sách:")
         st.dataframe(pd.DataFrame({
             "Hành động": ACTION_NAMES, "K %": [70, 40, 25, 20, 30], "D %": [10, 25, 45, 20, 20],
             "AI %": [10, 15, 15, 45, 10], "H %": [10, 20, 15, 15, 40]}),
             use_container_width=True, hide_index=True)
-        st.caption("α=0,1; γ=0,95; ε-greedy giảm từ 1,0 → 0,05 qua 10.000 episodes.")
+        st.subheader("Câu 11.3.2 — Cấu hình huấn luyện Q-learning")
+        st.markdown("- Learning rate **α = 0,1**; discount **γ = 0,95**.\n"
+                    "- ε-greedy: ε giảm tuyến tính từ **1,0 → 0,05** qua 5.000 episodes (khám phá "
+                    "→ khai thác), tổng **10.000 episodes**.\n"
+                    "- Bảng Q có kích thước 3×3×3×3×5 = 405 giá trị (81 trạng thái × 5 hành động).")
 
     with t_calc:
         Q, hist = train_q()
